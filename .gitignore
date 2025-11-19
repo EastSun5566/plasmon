@@ -1,5 +1,12 @@
 node_modules
 build
+dist
 pcman.js
 script.js
 *.log
+
+*.dmg
+*.zip
+*.exe
+*.deb
+*.AppImage

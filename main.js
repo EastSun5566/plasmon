@@ -1,84 +1,122 @@
-var ipc = require('ipc');
-var net = require('net');
+const { app, BrowserWindow, ipcMain } = require('electron');
+const { Client } = require('ssh2');
+const path = require('path');
 
-var telnet;
-var telnetConn = false;
-var currentData = null;
-var currentSite = null;
+let sshClient;
+let sshStream;
+let sshConn = false;
+let currentData = null;
+let currentSite = null;
 
 // Keep a global reference of the window object, if you don't, the window will
 // be closed automatically when the javascript object is GCed.
-var mainWindow = null;
+let mainWindow = null;
 
-function telnetConnect(site) {
+function sshConnect(site) {
 	currentSite = site;
-	telnetConn = true;
-	telnet = new net.Socket();
-	telnet.connect(23, site, function() {
-		console.log('TELNET START');
+	sshClient = new Client();
+	
+	sshClient.on('ready', function() {
+		console.log('SSH CONNECTION READY');
+		sshConn = true;
+		
+		// Open a shell session
+		sshClient.shell({ term: 'vt100' }, function(err, stream) {
+			if (err) {
+				console.error('SSH SHELL ERROR:', err);
+				sshConn = false;
+				return;
+			}
+			
+			sshStream = stream;
+			console.log('SSH SHELL STARTED');
+			
+			stream.on('data', function(data) {
+				currentData = data;
+				if (mainWindow && !mainWindow.isDestroyed()) {
+					mainWindow.webContents.send('data', data);
+				}
+			});
+			
+			stream.on('close', function() {
+				console.log('SSH STREAM CLOSED');
+				sshConn = false;
+				sshClient.end();
+			});
+			
+			stream.stderr.on('data', function(data) {
+				console.error('SSH STDERR:', data.toString());
+			});
+		});
 	});
-
-	telnet.on('data', function(data) {
-		currentData = data;
-		mainWindow.webContents.send('data', data);
+	
+	sshClient.on('error', function(err) {
+		console.error('SSH CONNECTION ERROR:', err);
+		sshConn = false;
 	});
-
-	telnet.on('end', function() {
-		console.log('TELNET END');
-		telnetConn = false;
+	
+	sshClient.on('end', function() {
+		console.log('SSH CONNECTION END');
+		sshConn = false;
+	});
+	
+	// Connect to SSH server
+	sshClient.connect({
+		host: site,
+		port: 22,
+		username: 'bbs',
+		password: '',
+		tryKeyboard: true,
+		readyTimeout: 20000
 	});
 }
 
-ipc.on('send', function(event, arg) {
-	if (telnetConn) telnet.write(arg, 'binary');
-	else telnetConnect(currentSite);
+ipcMain.on('send', function(event, arg) {
+	if (sshConn && sshStream) {
+		sshStream.write(arg, 'binary');
+	} else {
+		sshConnect(currentSite);
+	}
 });
 
-ipc.on('connect', function(event, site){
-	if (!telnetConn) {
-		telnetConnect(site);
+ipcMain.on('connect', function(event, site){
+	if (!sshConn) {
+		sshConnect(site);
 	} else {
-		if (mainWindow && currentData) {
+		if (mainWindow && currentData && !mainWindow.isDestroyed()) {
 			mainWindow.webContents.send('data', currentData);
 		}
 	}
 });
 
-var app = require('app');  // Module to control application life.
-var BrowserWindow = require('browser-window');  // Module to create native browser window.
-
-// Report crashes to our server.
-//require('crash-reporter').start();
-
 // Quit when all windows are closed.
 app.on('window-all-closed', function() {
-	if (process.platform != 'darwin')
+	if (process.platform !== 'darwin') {
 		app.quit();
+	}
 });
 
-// This method will be called when atom-shell has done everything
-// initialization and ready for creating browser windows.
-app.on('ready', function() {
+// This method will be called when Electron has finished
+// initialization and is ready to create browser windows.
+app.whenReady().then(() => {
 	// Create the browser window.
 	mainWindow = new BrowserWindow({
-		'center': true,
-		'dark-theme': true,
-		'web-preferences': {
-			'web-security': false
+		center: true,
+		width: 1024,
+		height: 768,
+		backgroundColor: '#000000',
+		webPreferences: {
+			preload: path.join(__dirname, 'preload.js'),
+			contextIsolation: false,
+			nodeIntegration: true,
+			sandbox: false
 		}
 	});
 
 	mainWindow.maximize();
 
-	// It is for livereload.
-	// If you want to development with livereload, 
-	// run `npm run server` and then `npm run livereload`.
-	if (process.argv.indexOf('--livereload') >= 0) {
-		mainWindow.loadUrl('http://localhost:3000/');
-	} else {
-		// and load the index.html of the app.
-		mainWindow.loadUrl('file://' + __dirname + '/index.html');
-	}
+	// Load the index.html of the app.
+	mainWindow.loadFile('index.html');
 
 	// Emitted when the window is closed.
 	mainWindow.on('closed', function() {
@@ -88,5 +126,26 @@ app.on('ready', function() {
 		mainWindow = null;
 	});
 
-	//mainWindow.toggleDevTools();
+	// mainWindow.webContents.openDevTools();
+});
+
+app.on('activate', function() {
+	// On macOS it's common to re-create a window in the app when the
+	// dock icon is clicked and there are no other windows open.
+	if (BrowserWindow.getAllWindows().length === 0) {
+		mainWindow = new BrowserWindow({
+			center: true,
+			width: 1024,
+			height: 768,
+			backgroundColor: '#000000',
+			webPreferences: {
+				preload: path.join(__dirname, 'preload.js'),
+				contextIsolation: false,
+				nodeIntegration: true,
+				sandbox: false
+			}
+		});
+		mainWindow.maximize();
+		mainWindow.loadFile('index.html');
+	}
 });
